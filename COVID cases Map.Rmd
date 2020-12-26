@@ -1,0 +1,212 @@
+---
+title: "Interactive Visualization - Display time series plot of the COVID cases for each county in California"
+author: "NINH NGUYEN"
+date: "12/15/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(htmltools)
+library(htmlwidgets)
+library(maps)
+library(leaflet)
+library(XML)
+library(xml2)
+library(RCurl)
+library(tidyverse)
+library(rvest)
+library(sf)
+library(tigris)
+library(gganimate)
+library(transformr)  # to use polygons in animation
+library(ggplot2)
+```
+CA covid data
+```{r}
+covid <- readRDS("~/ca.counties.covid.rds")
+```
+
+## Interact plot
+### Draw a time series plot of the COVID cases for each county in California.
+
+```{r}
+library(plotly)
+fig <- plot_ly(
+  type = "scatter",
+  x = as.Date(covid$date, format= "%Y-%m-%d"), 
+  y = covid$cases,
+  name = covid$name,
+  mode = "markers",
+)
+fig <- fig %>%
+  layout(
+    title = "Time series plot of the COVID cases for each county in California every day from 2020-03-01 to 2020-12-10",
+    xaxis = list(
+      type = "date",
+      range=c('2020-03-01', '2020-12-10')
+      )
+    )
+saveWidget(fig, "Plot1 - Covid cases",selfcontained = FALSE)
+
+```
+• Have the tooltips for each observation show the date, number of cases and deaths for that day and the pro-rated values for cases and deaths relative to the county’s population, and the cumulative number of cases and deaths up to that date.
+• Have the tooltips for each observation show the date, number of cases and deaths for that day and the pro-rated values for cases and deaths relative to the county’s population, and the cumulative number of cases and deaths up to that date.
+• Allow the viewer to highlight one county, with the others still appearing but in the background.
+• Allow the viewer to select a few counties and have these appear, but none of the others.
+• Allow the viewer to toggle the time series for all counties, and then select a few to add them back to the plot. (The point is to not require the user to hide each county individually.)
+
+```{r}
+covid <- covid %>%
+  group_by(name) %>%
+  arrange(date) %>%
+  mutate(
+    cm_deaths = cumsum(deaths),
+    cm_cases = cumsum(cases)
+  )
+```
+
+```{r}
+covid$hover <- with(covid,paste(
+  '<br>',covid$date,
+  '<br>',"Deaths:",covid$deaths,
+  '<br>',"Cumulative Deaths:",cm_deaths,
+  "<br>","pro-rated deaths per 10000:",covid$deaths*10000/covid$population,
+  '<br>',"Cases:",covid$cases,
+  '<br>',"Cumulative Cases:",cm_cases,
+  "<br>","pro-rated cases per 10000:",covid$cases*10000/covid$population
+                                )
+  )
+fig <- plot_ly(
+  type = "scatter",
+  x = as.Date(covid$date, format= "%Y-%m-%d"), 
+  y = covid$cm_cases,
+  name = covid$name,
+  mode = "markers",
+  hovertemplate = covid$hover
+)
+
+fig <- fig %>%
+  layout(
+    title = "Time series plot of the COVID cases for each county in California every day from 2020-03-01 to 2020-12-10",
+    xaxis = list(
+      type = "date",
+      range=c('2020-03-01', '2020-12-10')
+      )
+    )
+
+h = HTML("<h2>California County - Cumulative Covid Cases and number of deaths </h2><p>
+This plot shows the COVID cases for each county in California by date.
+<li>Double click on a county name in the legend to hide all of the lines</li>
+<li>Click on some county name in the legend to show the times series</li>
+<li>Hover/mouse over a point to see the tooltip and more details about that day's data for that county</li> ")
+
+py2 = prependContent(fig,h)
+saveWidget(py2, "Cumulative Covid cases",selfcontained = FALSE)
+```
+
+
+## Interactive on Map
+• Draw a map of the counties in CA.
+• Color each county by the percent
+• Animate the color for each county over time.
+
+## Import CA counties shape file
+```{r}
+ca_county<- read_sf("shape-files/CA_Counties/CA_Counties_TIGER2016.shp") %>%
+  st_transform("+proj=longlat +datum=WGS84")
+```
+Group by month, counties
+```{r}
+covid$month <- format(covid$date, "%m")
+covidMonth <- covid %>% 
+  group_by(month,name) %>%
+  summarise(deaths = sum(deaths),
+            cases = sum(cases))
+covidDF <- inner_join(ca_county,covidMonth,by = c("NAME"="name"))
+```
+
+```{r}
+bins <- c(-1, 42, 352, 2000,6000, 90000, Inf)
+pal <- colorBin("YlOrRd", domain = covidDF$cases, bins = bins)
+
+labels <- sprintf(
+  "<strong>%s</strong><br/>%g people / mi<sup>2</sup>",
+  covidDF$NAME, covidDF$cases
+) %>% lapply(htmltools::HTML)
+
+
+
+mapCase <- leaflet(covidDF) %>%
+  setView(-96, 37.8, 4) %>%
+  addPolygons(
+    data = covidDF,
+    fillColor = ~pal(cases),
+    weight = 2,
+    opacity = 1,
+    color = "white",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlight = highlightOptions(
+      weight = 5,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.7,
+      bringToFront = TRUE),
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "15px",
+      direction = "auto")) %>%
+  addLegend(pal = pal, values = ~cases, opacity = 0.7, title = NULL,
+    position = "topright") 
+
+h = HTML("<h2> Maps of California County - Total Covid Cases</h2><p>
+<li>Hover/mouse over a county on map to see total Covid Cases</li> ")
+
+py3 = prependContent(mapCase,h)
+saveWidget(py3, "Map of total Covid cases",selfcontained = FALSE)
+```
+
+Animate map over time
+```{r}
+library(ggmap)
+library(maps)
+library(gganimate)
+library(gifski)
+library(transformr)  # to use polygons in animation
+
+```
+
+```{r}
+md <- map_data('county', 'California')
+state.md <- map_data('state', 'California')
+covid$month <- format(covid$date, "%m")
+covidMonth <- covid %>% 
+  group_by(month,name,population) %>%
+  summarise(deaths = sum(deaths),
+            cases = sum(cases))
+covidMonth$subregion <- tolower(covidMonth$name)
+covidMonth$month <- as.numeric(covidMonth$month)
+covidMonth$Percent <- covidMonth$cases*10000/covidMonth$population
+plotData <- merge(md,covidMonth)
+plotData <- plotData %>% mutate(xloc =-78.5,yloc=18.75)
+
+
+baseMap <- ggplot() +
+  geom_polygon(data = plotData, aes(x=long, y = lat, fill=Percent, group = group), color="white") + 
+  geom_polygon(data = state.md, aes(x=long, y=lat, group=group), color="black", fill=NA) +
+  coord_fixed(1.3) +
+  scale_fill_gradient(low = "white", high = "orange", na.value="grey80") +
+  labs(title = "Map of the counties in CA by percent cases on 10000 people from 2020/03 to 2020/12")
+  
+animateMap <- baseMap +
+  theme_void() +
+  theme(legend.position=c(.92,.7), legend.text.align=0, plot.title=element_text(hjust=.1, face="bold"), plot.caption=element_text(hjust=0)) +
+  labs(title = 'Month: {frame_time}') + 
+  transition_time(month) +
+  ease_aes('linear')
+# save as gif
+mapGIF <- animate(animateMap) 
+anim_save("MPCmap.gif", animation=mapGIF)
+```
+https://gganimate.com/
